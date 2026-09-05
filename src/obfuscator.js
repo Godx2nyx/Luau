@@ -1,189 +1,77 @@
+// obfuscator.js
+
 const { hideConstants } = require("./constant-hider");
 const { solveMath } = require("./math-solver");
 
-/*
- * Luau Obfuscator
- *
- * Pipeline:
- *
- * Source
- *   ↓
- * Normalize
- *   ↓
- * Math Solver
- *   ↓
- * Constant Hider
- *   ↓
- * Output Validation
- *
- * This file intentionally does not execute Luau code.
- */
-
-function normalizeSource(source) {
-  return source.replace(/\r\n?/g, "\n");
-}
-
-/*
- * Remove accidental control characters that must
- * never appear in generated Luau source.
- *
- * We only remove the placeholder-control range used
- * by older versions of the transformer.
- */
-function sanitizeOutput(source) {
+function obfuscate(source, options = {}) {
   if (typeof source !== "string") {
-    throw new TypeError(
-      "Generated source must be a string"
-    );
+    throw new TypeError("Source must be a string");
   }
 
   /*
-   * These characters were previously used as
-   * internal placeholders:
-   *
-   * \x01
-   * \x02
-   * \x03
-   * \x04
-   *
-   * They are not valid source-level placeholders.
+   * Normalize line endings.
    */
-  return source.replace(/[\x01\x02\x03\x04]/g, "");
-}
+  let code =
+    source.replace(/\r\n?/g, "\n");
 
-/*
- * Detect broken internal placeholders.
- *
- * Safe textual placeholders are allowed only during
- * transformation and should never survive into final
- * generated code.
- */
-function validateOutput(source) {
-  if (typeof source !== "string") {
-    throw new TypeError(
-      "Generated source is not a string"
-    );
-  }
-
-  const forbiddenControl =
-    /[\x00-\x08\x0B\x0C\x0E-\x1F]/;
-
-  if (forbiddenControl.test(source)) {
-    throw new Error(
-      "Generated Luau contains invalid control characters"
-    );
-  }
-
-  /*
-   * Old placeholder formats should never survive.
-   */
-  if (
-    source.includes("__LUAPROTECT_") ||
-    source.includes("__LUANUM_") ||
-    source.includes("__LUABOOL_") ||
-    source.includes("__LUAMATHPROTECT_") ||
-    source.includes("__LUAMATHIDENT_")
-  ) {
-    throw new Error(
-      "Generated Luau contains unresolved internal placeholders"
-    );
-  }
-
-  return true;
-}
-
-function createStats() {
-  return {
+  const stats = {
     strings: 0,
     numbers: 0,
     booleans: 0
   };
-}
-
-function obfuscate(source, options = {}) {
-  if (typeof source !== "string") {
-    throw new TypeError(
-      "Source must be a string"
-    );
-  }
-
-  if (
-    options === null ||
-    typeof options !== "object"
-  ) {
-    options = {};
-  }
-
-  let code =
-    normalizeSource(source);
-
-  const stats =
-    createStats();
 
   /*
-   * Step 1:
-   * Solve safe constant math expressions.
+   * Math solving happens before constant hiding.
    *
-   * This stage only works with numeric expressions
-   * and never executes arbitrary Luau code.
+   * Example:
+   *
+   * 10 + 20
+   *
+   * becomes:
+   *
+   * 30
+   *
+   * and then constant-hider can hide 30.
    */
   if (options.solveMath !== false) {
-    const solved =
-      solveMath(code);
-
-    if (typeof solved !== "string") {
-      throw new Error(
-        "Math solver returned invalid source"
-      );
-    }
-
-    code = solved;
+    code = solveMath(code);
   }
 
   /*
-   * Step 2:
    * Hide constants.
    *
-   * String / number / boolean constants are moved
-   * into generated local tables.
+   * The new constant-hider generates:
+   *
+   * local __S_x = "Hello"
+   * local __N_x = 123
+   * local __B_x = true
+   *
+   * instead of:
+   *
+   * local __S_x = {
+   *     "Hello"
+   * }
+   *
+   * followed by:
+   *
+   * __S_x[1]
    */
   if (options.hideConstants !== false) {
     const result =
       hideConstants(code);
 
-    if (
-      !result ||
-      typeof result.source !== "string"
-    ) {
-      throw new Error(
-        "Constant hider returned invalid source"
-      );
-    }
+    code = result.source;
 
-    code =
-      result.source;
+    stats.strings =
+      result.counts.strings;
 
-    if (
-      result.counts &&
-      typeof result.counts === "object"
-    ) {
-      stats.strings =
-        Number(result.counts.strings) || 0;
+    stats.numbers =
+      result.counts.numbers;
 
-      stats.numbers =
-        Number(result.counts.numbers) || 0;
+    stats.booleans =
+      result.counts.booleans;
 
-      stats.booleans =
-        Number(result.counts.booleans) || 0;
-    }
-
-    /*
-     * Add constant tables before the source.
-     */
-    if (
-      typeof result.header === "string" &&
-      result.header.length > 0
-    ) {
+    if (result.header) {
       code =
         result.header +
         "\n\n" +
@@ -192,46 +80,18 @@ function obfuscate(source, options = {}) {
   }
 
   /*
-   * Step 3:
-   * Sanitize accidental legacy control characters.
-   *
-   * This is a final safety net.
-   */
-  code =
-    sanitizeOutput(code);
-
-  /*
-   * Step 4:
-   * Validate generated output.
-   *
-   * Do this BEFORE adding the banner so errors point
-   * at the actual generated source.
-   */
-  validateOutput(code);
-
-  /*
-   * Header / banner.
+   * Generated-file banner.
    */
   const banner =
     "-- Generated by Luau Obfuscator\n" +
     "-- Local source transformer\n\n";
 
-  const finalCode =
-    banner + code;
-
-  /*
-   * Validate the complete final output too.
-   */
-  validateOutput(finalCode);
-
   return {
-    code: finalCode,
+    code: banner + code,
     stats
   };
 }
 
 module.exports = {
-  obfuscate,
-  sanitizeOutput,
-  validateOutput
+  obfuscate
 };
