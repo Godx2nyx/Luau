@@ -1,8 +1,22 @@
 // math-solver.js
 // Conservative Luau constant-expression solver.
-// Does NOT execute arbitrary Luau source.
-// Only folds expressions consisting entirely of numeric literals
-// and supported arithmetic / bitwise operators.
+// Does not execute arbitrary Luau source.
+
+function isDigit(c) {
+  return c >= "0" && c <= "9";
+}
+
+function isHexDigit(c) {
+  return (
+    (c >= "0" && c <= "9") ||
+    (c >= "a" && c <= "f") ||
+    (c >= "A" && c <= "F")
+  );
+}
+
+function isIdentifierChar(c) {
+  return !!c && /[A-Za-z0-9_]/.test(c);
+}
 
 function isNumber(value) {
   return /^(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+)$/i.test(value);
@@ -29,30 +43,10 @@ function formatNumber(value) {
     return String(value);
   }
 
-  const result = Number(
-    value.toPrecision(15)
-  );
-
-  if (!Number.isFinite(result)) {
-    return null;
-  }
-
-  return String(result);
+  return String(Number(value.toPrecision(15)));
 }
 
-/*
- * Apply one binary operation.
- *
- * Returns null when the operation should not be folded.
- */
 function solveOperation(left, operator, right) {
-  if (
-    !Number.isFinite(left) ||
-    !Number.isFinite(right)
-  ) {
-    return null;
-  }
-
   switch (operator) {
     case "+":
       return left + right;
@@ -64,29 +58,17 @@ function solveOperation(left, operator, right) {
       return left * right;
 
     case "/":
-      if (right === 0) {
-        return null;
-      }
-
+      if (right === 0) return null;
       return left / right;
 
     case "%":
-      if (right === 0) {
-        return null;
-      }
-
+      if (right === 0) return null;
       return left % right;
 
     case "//":
-      if (right === 0) {
-        return null;
-      }
-
+      if (right === 0) return null;
       return Math.floor(left / right);
 
-    /*
-     * Luau bitwise operators work on integers.
-     */
     case "&":
       if (
         !Number.isInteger(left) ||
@@ -142,52 +124,20 @@ function solveOperation(left, operator, right) {
   }
 }
 
-/*
- * Operator precedence.
- *
- * Higher number = tighter binding.
- */
 const PRECEDENCE = {
   "|": 1,
   "~": 2,
   "&": 3,
-
   "<<": 4,
   ">>": 4,
-
   "+": 5,
   "-": 5,
-
   "*": 6,
   "/": 6,
   "%": 6,
   "//": 6
 };
 
-function isOperator(value) {
-  return Object.prototype.hasOwnProperty.call(
-    PRECEDENCE,
-    value
-  );
-}
-
-/*
- * Tokenize a numeric-only expression.
- *
- * This is intentionally strict.
- *
- * Example accepted:
- *
- *   2 + 3 * 4
- *   100 // 3
- *   10 << 2
- *
- * Example rejected:
- *
- *   foo + 2
- *   game:GetService(...)
- *   "hello" + 2
- */
 function tokenizeExpression(expression) {
   const tokens = [];
   let i = 0;
@@ -200,9 +150,6 @@ function tokenizeExpression(expression) {
       continue;
     }
 
-    /*
-     * Parentheses.
-     */
     if (c === "(" || c === ")") {
       tokens.push({
         type: c,
@@ -214,11 +161,12 @@ function tokenizeExpression(expression) {
     }
 
     /*
-     * Hex number.
+     * Hexadecimal number.
      */
     if (
       c === "0" &&
-      /[xX]/.test(expression[i + 1] || "")
+      (expression[i + 1] === "x" ||
+        expression[i + 1] === "X")
     ) {
       const start = i;
 
@@ -228,7 +176,7 @@ function tokenizeExpression(expression) {
 
       while (
         i < expression.length &&
-        /[0-9a-fA-F]/.test(expression[i])
+        isHexDigit(expression[i])
       ) {
         i++;
       }
@@ -249,40 +197,37 @@ function tokenizeExpression(expression) {
      * Decimal number.
      */
     if (
-      /[0-9]/.test(c) ||
-      (
-        c === "." &&
-        /[0-9]/.test(expression[i + 1] || "")
-      )
+      isDigit(c) ||
+      (c === "." && isDigit(expression[i + 1]))
     ) {
       const start = i;
 
-      let hasDot = false;
-
       if (c === ".") {
-        hasDot = true;
-        i++;
-      }
-
-      while (
-        i < expression.length &&
-        /[0-9]/.test(expression[i])
-      ) {
-        i++;
-      }
-
-      if (
-        !hasDot &&
-        expression[i] === "."
-      ) {
-        hasDot = true;
         i++;
 
         while (
           i < expression.length &&
-          /[0-9]/.test(expression[i])
+          isDigit(expression[i])
         ) {
           i++;
+        }
+      } else {
+        while (
+          i < expression.length &&
+          isDigit(expression[i])
+        ) {
+          i++;
+        }
+
+        if (expression[i] === ".") {
+          i++;
+
+          while (
+            i < expression.length &&
+            isDigit(expression[i])
+          ) {
+            i++;
+          }
         }
       }
 
@@ -293,6 +238,8 @@ function tokenizeExpression(expression) {
         expression[i] === "e" ||
         expression[i] === "E"
       ) {
+        const exponentStart = i;
+
         i++;
 
         if (
@@ -302,37 +249,23 @@ function tokenizeExpression(expression) {
           i++;
         }
 
-        const exponentStart = i;
+        const digitStart = i;
 
         while (
           i < expression.length &&
-          /[0-9]/.test(expression[i])
+          isDigit(expression[i])
         ) {
           i++;
         }
 
-        if (i === exponentStart) {
-          return null;
+        if (digitStart === i) {
+          i = exponentStart;
         }
-      }
-
-      const value =
-        expression.slice(start, i);
-
-      /*
-       * Keep solver conservative.
-       */
-      if (
-        !/^(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+))$/i.test(
-          value
-        )
-      ) {
-        return null;
       }
 
       tokens.push({
         type: "number",
-        value
+        value: expression.slice(start, i)
       });
 
       continue;
@@ -381,8 +314,8 @@ function tokenizeExpression(expression) {
     }
 
     /*
-     * Anything else means this is not
-     * a safe constant expression.
+     * Anything else means this isn't a numeric-only
+     * expression.
      */
     return null;
   }
@@ -390,10 +323,6 @@ function tokenizeExpression(expression) {
   return tokens;
 }
 
-/*
- * Convert infix expression to postfix using
- * the Shunting-Yard algorithm.
- */
 function toPostfix(tokens) {
   const output = [];
   const operators = [];
@@ -410,20 +339,20 @@ function toPostfix(tokens) {
     }
 
     if (token.type === ")") {
-      let foundOpening = false;
+      let found = false;
 
       while (operators.length > 0) {
         const top = operators.pop();
 
         if (top.type === "(") {
-          foundOpening = true;
+          found = true;
           break;
         }
 
         output.push(top);
       }
 
-      if (!foundOpening) {
+      if (!found) {
         return null;
       }
 
@@ -435,9 +364,7 @@ function toPostfix(tokens) {
         const top =
           operators[operators.length - 1];
 
-        if (
-          top.type !== "operator"
-        ) {
+        if (top.type !== "operator") {
           break;
         }
 
@@ -476,13 +403,6 @@ function toPostfix(tokens) {
   return output;
 }
 
-/*
- * Evaluate postfix expression.
- *
- * This does NOT execute Lua/Luau code.
- * It only operates on numbers already parsed
- * from the expression.
- */
 function evaluatePostfix(tokens) {
   const stack = [];
 
@@ -504,11 +424,8 @@ function evaluatePostfix(tokens) {
         return null;
       }
 
-      const right =
-        stack.pop();
-
-      const left =
-        stack.pop();
+      const right = stack.pop();
+      const left = stack.pop();
 
       const result =
         solveOperation(
@@ -517,11 +434,8 @@ function evaluatePostfix(tokens) {
           right
         );
 
-      if (result === null) {
-        return null;
-      }
-
       if (
+        result === null ||
         !Number.isFinite(result)
       ) {
         return null;
@@ -541,9 +455,6 @@ function evaluatePostfix(tokens) {
   return stack[0];
 }
 
-/*
- * Try to completely solve an expression.
- */
 function solveExpression(expression) {
   const tokens =
     tokenizeExpression(expression);
@@ -570,113 +481,63 @@ function solveExpression(expression) {
 }
 
 /*
- * Find and fold numeric expressions inside source.
- *
- * Strings and comments are protected with SAFE
- * textual placeholders. No control characters
- * are ever inserted into the source.
+ * Protect strings and comments.
  */
-function solveMath(source) {
-  if (
-    typeof source !== "string" ||
-    source.length === 0
-  ) {
-    return source;
-  }
+function protectSource(source) {
+  const parts = [];
 
-  const protectedParts = [];
-
-  function protect(match) {
-    const id =
-      `__LUAMATHPROTECT_${protectedParts.length}__`;
-
-    protectedParts.push(match);
-
-    return id;
-  }
-
-  /*
-   * Protect:
-   * - double quoted strings
-   * - single quoted strings
-   * - multiline comments
-   * - single line comments
-   */
   let output = source.replace(
     /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|--\[\[[\s\S]*?\]\]|--[^\n]*/g,
-    protect
-  );
-
-  /*
-   * Protect identifiers temporarily.
-   *
-   * This prevents the solver from accidentally
-   * treating a number inside an identifier as
-   * part of an expression.
-   */
-  output = output.replace(
-    /[A-Za-z_][A-Za-z0-9_]*/g,
     match => {
       const id =
-        `__LUAMATHIDENT_${protectedParts.length}__`;
+        `__LUAMATHPROTECT_${parts.length}__`;
 
-      protectedParts.push(match);
+      parts.push(match);
 
       return id;
     }
   );
 
+  return {
+    output,
+    parts
+  };
+}
+
+function restoreSource(source, parts) {
+  return source.replace(
+    /__LUAMATHPROTECT_(\d+)__/g,
+    (_, index) => {
+      return parts[Number(index)] || "";
+    }
+  );
+}
+
+/*
+ * Find numeric expressions without using the broken
+ * giant regex from the previous version.
+ */
+function foldNumericExpressions(source) {
+  let output = source;
+
   /*
-   * Fold parenthesized numeric expressions first.
-   *
-   * Example:
-   *
-   * (2 + 3) * 4
-   *
-   * -> 5 * 4
-   * -> 20
+   * First solve parenthesized expressions.
    */
   for (let pass = 0; pass < 16; pass++) {
     let changed = false;
 
-    /*
-     * Innermost parentheses.
-     */
     output = output.replace(
       /\(([^()]*)\)/g,
       (full, inner) => {
-        const solved =
+        const result =
           solveExpression(inner);
 
-        if (solved === null) {
+        if (result === null) {
           return full;
         }
 
         changed = true;
-
-        return solved;
-      }
-    );
-
-    /*
-     * Plain numeric expression.
-     *
-     * Require boundaries so this cannot eat
-     * pieces of generated identifiers.
-     */
-    output = output.replace(
-      /(?<![A-Za-z0-9_.$])(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+)(?:\s*(?://|<<|>>|[+\-*/%&|~])\s*(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+))+(?![A-Za-z0-9_.$])/gi,
-      match => {
-        const solved =
-          solveExpression(match);
-
-        if (solved === null) {
-          return match;
-        }
-
-        changed = true;
-
-        return solved;
+        return result;
       }
     );
 
@@ -686,36 +547,297 @@ function solveMath(source) {
   }
 
   /*
-   * Restore protected identifiers.
+   * Find simple numeric binary expressions.
    *
-   * We stored identifiers after strings/comments,
-   * so their indices are all in the same array.
+   * Instead of one giant regex, scan the source.
    */
-  output = output.replace(
-    /__LUAMATHIDENT_(\d+)__/g,
-    (_, index) => {
-      return protectedParts[
-        Number(index)
-      ];
+  let result = "";
+  let i = 0;
+
+  while (i < output.length) {
+    const c = output[i];
+
+    /*
+     * Number start.
+     */
+    const numberStart =
+      isDigit(c) ||
+      (
+        c === "." &&
+        isDigit(output[i + 1])
+      );
+
+    if (!numberStart) {
+      result += c;
+      i++;
+      continue;
     }
-  );
+
+    /*
+     * Don't touch numbers that are part of
+     * identifiers or property names.
+     */
+    const previous =
+      output[i - 1];
+
+    if (
+      isIdentifierChar(previous) ||
+      previous === "."
+    ) {
+      result += c;
+      i++;
+      continue;
+    }
+
+    const start = i;
+
+    /*
+     * Read the first number.
+     */
+    if (
+      output[i] === "0" &&
+      (
+        output[i + 1] === "x" ||
+        output[i + 1] === "X"
+      )
+    ) {
+      i += 2;
+
+      while (
+        i < output.length &&
+        isHexDigit(output[i])
+      ) {
+        i++;
+      }
+    } else {
+      if (output[i] === ".") {
+        i++;
+
+        while (
+          i < output.length &&
+          isDigit(output[i])
+        ) {
+          i++;
+        }
+      } else {
+        while (
+          i < output.length &&
+          isDigit(output[i])
+        ) {
+          i++;
+        }
+
+        if (output[i] === ".") {
+          i++;
+
+          while (
+            i < output.length &&
+            isDigit(output[i])
+          ) {
+            i++;
+          }
+        }
+      }
+    }
+
+    /*
+     * Read expression around the number.
+     *
+     * Keep this conservative: only continue if an
+     * operator and another numeric literal follow.
+     */
+    let end = i;
+
+    while (true) {
+      const operatorStart = end;
+
+      while (
+        end < output.length &&
+        /\s/.test(output[end])
+      ) {
+        end++;
+      }
+
+      const two =
+        output.slice(end, end + 2);
+
+      let operator = null;
+
+      if (
+        two === "//" ||
+        two === "<<" ||
+        two === ">>"
+      ) {
+        operator = two;
+        end += 2;
+      } else if (
+        output[end] === "+" ||
+        output[end] === "-" ||
+        output[end] === "*" ||
+        output[end] === "/" ||
+        output[end] === "%" ||
+        output[end] === "&" ||
+        output[end] === "|" ||
+        output[end] === "~"
+      ) {
+        operator = output[end];
+        end++;
+      }
+
+      if (!operator) {
+        end = operatorStart;
+        break;
+      }
+
+      while (
+        end < output.length &&
+        /\s/.test(output[end])
+      ) {
+        end++;
+      }
+
+      /*
+       * Require another number.
+       */
+      if (
+        !isDigit(output[end]) &&
+        !(
+          output[end] === "." &&
+          isDigit(output[end + 1])
+        ) &&
+        !(
+          output[end] === "0" &&
+          (
+            output[end + 1] === "x" ||
+            output[end + 1] === "X"
+          )
+        )
+      ) {
+        end = operatorStart;
+        break;
+      }
+
+      /*
+       * Consume second number.
+       */
+      if (
+        output[end] === "0" &&
+        (
+          output[end + 1] === "x" ||
+          output[end + 1] === "X"
+        )
+      ) {
+        end += 2;
+
+        while (
+          end < output.length &&
+          isHexDigit(output[end])
+        ) {
+          end++;
+        }
+      } else if (
+        output[end] === "."
+      ) {
+        end++;
+
+        while (
+          end < output.length &&
+          isDigit(output[end])
+        ) {
+          end++;
+        }
+      } else {
+        while (
+          end < output.length &&
+          isDigit(output[end])
+        ) {
+          end++;
+        }
+
+        if (output[end] === ".") {
+          end++;
+
+          while (
+            end < output.length &&
+            isDigit(output[end])
+          ) {
+            end++;
+          }
+        }
+      }
+    }
+
+    const expression =
+      output.slice(start, end);
+
+    const solved =
+      solveExpression(expression);
+
+    if (solved !== null) {
+      result += solved;
+      i = end;
+    } else {
+      result += output.slice(start, i);
+      i = i;
+    }
+  }
+
+  return result;
+}
+
+function solveMath(source) {
+  if (
+    typeof source !== "string" ||
+    source.length === 0
+  ) {
+    return source;
+  }
+
+  const protectedSource =
+    protectSource(source);
+
+  let output =
+    protectedSource.output;
 
   /*
-   * Restore strings/comments.
+   * Run a few conservative passes.
    */
-  output = output.replace(
-    /__LUAMATHPROTECT_(\d+)__/g,
-    (_, index) => {
-      return protectedParts[
-        Number(index)
-      ];
+  for (let i = 0; i < 8; i++) {
+    const next =
+      foldNumericExpressions(output);
+
+    if (next === output) {
+      break;
     }
-  );
+
+    output = next;
+  }
+
+  /*
+   * Restore original strings/comments.
+   */
+  output =
+    restoreSource(
+      output,
+      protectedSource.parts
+    );
+
+  /*
+   * Safety check:
+   * the math solver must never emit the old
+   * control-character placeholders.
+   */
+  output =
+    output.replace(
+      /[\x01\x02\x03\x04]/g,
+      ""
+    );
 
   return output;
 }
 
 module.exports = {
   solveMath,
-  solveExpression
+  solveExpression,
+  isNumber
 };
