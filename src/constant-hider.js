@@ -1,3 +1,7 @@
+// constant-hider.js
+// Conservative Luau constant hider.
+// Never inserts control characters into generated Luau.
+
 function randomName(prefix, used) {
   let name;
 
@@ -19,34 +23,56 @@ function escapeLuauString(value) {
     .replace(/\t/g, "\\t");
 }
 
+function unquoteString(value) {
+  if (
+    value.length >= 2 &&
+    (
+      value[0] === '"' ||
+      value[0] === "'"
+    ) &&
+    value[value.length - 1] === value[0]
+  ) {
+    return value.slice(1, -1);
+  }
+
+  return value;
+}
+
 function hideConstants(source) {
   const usedNames = new Set();
 
-  const strings = [];
-  const numbers = [];
-  const booleans = [];
-
-  const protectedParts = [];
+  const stringMap = new Map();
+  const numberMap = new Map();
+  const booleanMap = new Map();
 
   /*
-   * Protect strings and comments first.
-   * This prevents numbers or boolean words inside
-   * strings/comments from being treated as constants.
+   * Safe placeholders.
+   *
+   * IMPORTANT:
+   * Do not use \u0001 / \u0002 / \u0003 / \u0004.
+   * Those characters are invalid in generated Luau.
+   */
+  const protectedParts = [];
+
+  function protect(match) {
+    const id =
+      `__LUAPROTECT_${protectedParts.length}__`;
+
+    protectedParts.push(match);
+
+    return id;
+  }
+
+  /*
+   * Protect strings and comments.
    */
   let masked = source.replace(
     /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|--\[\[[\s\S]*?\]\]|--[^\n]*/g,
-    match => {
-      const id =
-        `\u0001${protectedParts.length}\u0002`;
-
-      protectedParts.push(match);
-
-      return id;
-    }
+    protect
   );
 
   /*
-   * Collect string literals.
+   * Collect constants from protected parts.
    */
   for (const part of protectedParts) {
     if (part.startsWith("--")) {
@@ -57,100 +83,107 @@ function hideConstants(source) {
       part.startsWith('"') ||
       part.startsWith("'")
     ) {
-      strings.push(part.slice(1, -1));
+      const value = unquoteString(part);
+
+      if (!stringMap.has(value)) {
+        stringMap.set(
+          value,
+          stringMap.size + 1
+        );
+      }
     }
   }
 
   /*
-   * Collect number literals.
+   * Collect numbers.
+   *
+   * Avoid numbers that are part of identifiers.
    */
   masked = masked.replace(
-    /\b(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+)\b/gi,
+    /(?<![A-Za-z0-9_])(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+)(?![A-Za-z0-9_])/gi,
     match => {
-      numbers.push(match);
+      if (!numberMap.has(match)) {
+        numberMap.set(
+          match,
+          numberMap.size + 1
+        );
+      }
 
-      return (
-        `\u0003N${numbers.length - 1}\u0004`
-      );
+      return `__LUANUM_${numberMap.get(match)}__`;
     }
   );
 
   /*
-   * Collect boolean literals.
+   * Collect booleans.
    */
   masked = masked.replace(
-    /\b(true|false)\b/g,
+    /(?<![A-Za-z0-9_])(true|false)(?![A-Za-z0-9_])/g,
     match => {
-      booleans.push(match);
+      if (!booleanMap.has(match)) {
+        booleanMap.set(
+          match,
+          booleanMap.size + 1
+        );
+      }
 
-      return (
-        `\u0003B${booleans.length - 1}\u0004`
-      );
+      return `__LUABOOL_${booleanMap.get(match)}__`;
     }
   );
-
-  /*
-   * Remove duplicate constants.
-   */
-  const uniqueStrings = [
-    ...new Map(
-      strings.map(value => [value, value])
-    ).values()
-  ];
-
-  const uniqueNumbers = [
-    ...new Map(
-      numbers.map(value => [value, value])
-    ).values()
-  ];
-
-  const uniqueBooleans = [
-    ...new Map(
-      booleans.map(value => [value, value])
-    ).values()
-  ];
 
   /*
    * Generate table names.
    */
   const stringTableName =
-    uniqueStrings.length > 0
+    stringMap.size > 0
       ? randomName("__S", usedNames)
       : null;
 
   const numberTableName =
-    uniqueNumbers.length > 0
+    numberMap.size > 0
       ? randomName("__N", usedNames)
       : null;
 
   const booleanTableName =
-    uniqueBooleans.length > 0
+    booleanMap.size > 0
       ? randomName("__B", usedNames)
       : null;
 
   /*
    * Restore protected strings/comments.
-   *
-   * String literals become table references.
-   * Comments are restored unchanged.
    */
   masked = masked.replace(
-    /\u0001(\d+)\u0002/g,
+    /__LUAPROTECT_(\d+)__/g,
     (_, index) => {
       const original =
         protectedParts[Number(index)];
 
-      // Comment
+      if (!original) {
+        throw new Error(
+          "Constant hider: invalid protected-part index"
+        );
+      }
+
+      /*
+       * Comments remain untouched.
+       */
       if (original.startsWith("--")) {
         return original;
       }
 
-      // String
+      /*
+       * Strings become string-table references.
+       */
       const value =
-        original.slice(1, -1);
+        unquoteString(original);
 
       const position =
-        uniqueStrings.indexOf(value) + 1;
+        stringMap.get(value);
+
+      if (!position || !stringTableName) {
+        throw new Error(
+          "Constant hider: string mapping failed"
+        );
+      }
 
       return `${stringTableName}[${position}]`;
     }
@@ -160,15 +193,20 @@ function hideConstants(source) {
    * Replace number placeholders.
    */
   masked = masked.replace(
-    /\u0003N(\d+)\u0004/g,
+    /__LUANUM_(\d+)__/g,
     (_, index) => {
-      const value =
-        numbers[Number(index)];
+      const wantedIndex =
+        Number(index);
 
-      const position =
-        uniqueNumbers.indexOf(value) + 1;
+      for (const [value, position] of numberMap) {
+        if (position === wantedIndex) {
+          return `${numberTableName}[${position}]`;
+        }
+      }
 
-      return `${numberTableName}[${position}]`;
+      throw new Error(
+        "Constant hider: number mapping failed"
+      );
     }
   );
 
@@ -176,20 +214,25 @@ function hideConstants(source) {
    * Replace boolean placeholders.
    */
   masked = masked.replace(
-    /\u0003B(\d+)\u0004/g,
+    /__LUABOOL_(\d+)__/g,
     (_, index) => {
-      const value =
-        booleans[Number(index)];
+      const wantedIndex =
+        Number(index);
 
-      const position =
-        uniqueBooleans.indexOf(value) + 1;
+      for (const [value, position] of booleanMap) {
+        if (position === wantedIndex) {
+          return `${booleanTableName}[${position}]`;
+        }
+      }
 
-      return `${booleanTableName}[${position}]`;
+      throw new Error(
+        "Constant hider: boolean mapping failed"
+      );
     }
   );
 
   /*
-   * Build constant tables.
+   * Build header.
    */
   const header = [];
 
@@ -198,13 +241,14 @@ function hideConstants(source) {
       `local ${stringTableName} = {`
     );
 
-    for (const value of uniqueStrings) {
+    for (const [value] of stringMap) {
       header.push(
         `    "${escapeLuauString(value)}",`
       );
     }
 
     header.push("}");
+    header.push("");
   }
 
   if (numberTableName) {
@@ -212,13 +256,14 @@ function hideConstants(source) {
       `local ${numberTableName} = {`
     );
 
-    for (const value of uniqueNumbers) {
+    for (const [value] of numberMap) {
       header.push(
         `    ${value},`
       );
     }
 
     header.push("}");
+    header.push("");
   }
 
   if (booleanTableName) {
@@ -226,13 +271,14 @@ function hideConstants(source) {
       `local ${booleanTableName} = {`
     );
 
-    for (const value of uniqueBooleans) {
+    for (const [value] of booleanMap) {
       header.push(
         `    ${value},`
       );
     }
 
     header.push("}");
+    header.push("");
   }
 
   return {
@@ -240,9 +286,9 @@ function hideConstants(source) {
     header: header.join("\n"),
 
     counts: {
-      strings: uniqueStrings.length,
-      numbers: uniqueNumbers.length,
-      booleans: uniqueBooleans.length
+      strings: stringMap.size,
+      numbers: numberMap.size,
+      booleans: booleanMap.size
     }
   };
 }
