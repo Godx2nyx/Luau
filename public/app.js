@@ -1,218 +1,279 @@
-const $ = id => document.getElementById(id);
+const input =
+  document.getElementById("input");
 
-const input = $("input");
-const output = $("output");
-const obfuscateBtn = $("obfuscateBtn");
-const copyBtn = $("copyBtn");
-const downloadBtn = $("downloadBtn");
-const clearBtn = $("clearBtn");
-const hideConstants = $("hideConstants");
-const solveMath = $("solveMath");
-const message = $("message");
+const output =
+  document.getElementById("output");
 
-/*
- * Update status text.
- */
+const obfuscateBtn =
+  document.getElementById(
+    "obfuscateBtn"
+  );
+
+const clearBtn =
+  document.getElementById(
+    "clearBtn"
+  );
+
+const copyBtn =
+  document.getElementById(
+    "copyBtn"
+  );
+
+const downloadBtn =
+  document.getElementById(
+    "downloadBtn"
+  );
+
+const hideConstants =
+  document.getElementById(
+    "hideConstants"
+  );
+
+const solveMath =
+  document.getElementById(
+    "solveMath"
+  );
+
+const enableVM =
+  document.getElementById(
+    "enableVM"
+  );
+
+const message =
+  document.getElementById(
+    "message"
+  );
+
+const stats =
+  document.getElementById(
+    "stats"
+  );
+
 function setMessage(text) {
-  if (message) {
-    message.textContent = text;
-  }
+  message.textContent = text;
 }
 
-/*
- * Obfuscate source.
- */
-obfuscateBtn.addEventListener("click", async () => {
-  const source = input.value;
-
-  if (!source.trim()) {
-    setMessage("Input is empty.");
+function updateStats(data) {
+  if (!data) {
+    stats.hidden = true;
     return;
   }
 
-  obfuscateBtn.disabled = true;
-  setMessage("Processing...");
+  stats.hidden = false;
 
-  try {
-    const response = await fetch(
-      "/api/obfuscate",
-      {
-        method: "POST",
+  document.getElementById(
+    "statStrings"
+  ).textContent =
+    data.strings || 0;
 
-        headers: {
-          "Content-Type": "application/json"
-        },
+  document.getElementById(
+    "statNumbers"
+  ).textContent =
+    data.numbers || 0;
 
-        body: JSON.stringify({
-          source,
+  document.getElementById(
+    "statBooleans"
+  ).textContent =
+    data.booleans || 0;
 
-          options: {
-            hideConstants:
-              hideConstants.checked,
+  document.getElementById(
+    "statInstructions"
+  ).textContent =
+    data.instructions || 0;
 
-            solveMath:
-              solveMath.checked
-          }
-        })
-      }
-    );
+  document.getElementById(
+    "statVMConstants"
+  ).textContent =
+    data.constants || 0;
+}
 
-    let data;
-
-    try {
-      data = await response.json();
-    } catch {
-      throw new Error(
-        "Server returned invalid JSON."
-      );
-    }
-
-    if (!response.ok) {
-      throw new Error(
-        data.error ||
-        "Obfuscation failed."
-      );
-    }
-
-    /*
-     * Supports the object returned by
-     * the current obfuscator.
-     */
-    if (
-      data.output &&
-      typeof data.output === "string"
-    ) {
-      output.value = data.output;
-    } else if (
-      data.output &&
-      typeof data.output.code === "string"
-    ) {
-      output.value = data.output.code;
-    } else {
-      throw new Error(
-        "Server returned no output."
-      );
-    }
-
-    setMessage("Obfuscation complete.");
-  } catch (error) {
-    console.error(error);
-
-    setMessage(
-      error.message ||
-      "Something went wrong."
-    );
-  } finally {
-    obfuscateBtn.disabled = false;
-  }
-});
-
-/*
- * Copy output.
- */
-copyBtn.addEventListener("click", async () => {
-  const text = output.value;
-
-  if (!text) {
-    setMessage("Nothing to copy.");
-    return;
-  }
-
-  try {
-    await navigator.clipboard.writeText(text);
-
-    setMessage(
-      "Output copied to clipboard."
-    );
-  } catch {
-    /*
-     * Fallback for browsers where
-     * navigator.clipboard is unavailable.
-     */
-    output.focus();
-    output.select();
-
-    document.execCommand("copy");
-
-    setMessage(
-      "Output copied to clipboard."
-    );
-  }
-});
-
-/*
- * Download .luau file.
- */
-downloadBtn.addEventListener(
+obfuscateBtn.addEventListener(
   "click",
-  () => {
-    const text = output.value;
+  async () => {
+    const source =
+      input.value;
 
-    if (!text) {
-      setMessage("Nothing to download.");
+    if (!source.trim()) {
+      setMessage(
+        "Input is empty."
+      );
+
+      output.value = "";
+
       return;
     }
 
-    const blob = new Blob(
-      [text],
-      {
-        type:
-          "text/plain;charset=utf-8"
-      }
-    );
+    obfuscateBtn.disabled = true;
 
-    const url =
-      URL.createObjectURL(blob);
-
-    const link =
-      document.createElement("a");
-
-    link.href = url;
-    link.download =
-      "obfuscated.luau";
-
-    document.body.appendChild(link);
-
-    link.click();
-
-    link.remove();
-
-    URL.revokeObjectURL(url);
+    obfuscateBtn.textContent =
+      "Processing...";
 
     setMessage(
-      "Downloaded obfuscated.luau."
+      "Obfuscating..."
     );
+
+    try {
+      const response =
+        await fetch(
+          "/api/obfuscate",
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+
+            body: JSON.stringify({
+              source,
+
+              options: {
+                hideConstants:
+                  hideConstants.checked,
+
+                solveMath:
+                  solveMath.checked,
+
+                vm:
+                  enableVM.checked
+              }
+            })
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+          "Obfuscation failed"
+        );
+      }
+
+      output.value =
+        data.output || "";
+
+      updateStats(
+        data.stats
+      );
+
+      if (data.stats?.vm) {
+        setMessage(
+          `Done • VM generated ${data.stats.instructions} instructions`
+        );
+      } else {
+        setMessage(
+          "Obfuscation complete."
+        );
+      }
+
+    } catch (error) {
+      output.value = "";
+
+      updateStats(null);
+
+      setMessage(
+        error.message ||
+        "Request failed."
+      );
+    } finally {
+      obfuscateBtn.disabled =
+        false;
+
+      obfuscateBtn.innerHTML =
+        "Obfuscate <b>→</b>";
+    }
   }
 );
 
-/*
- * Clear input and output.
- */
 clearBtn.addEventListener(
   "click",
   () => {
     input.value = "";
     output.value = "";
 
-    setMessage("Cleared.");
+    updateStats(null);
+
+    setMessage(
+      "Cleared."
+    );
   }
 );
 
-/*
- * Ctrl + Enter / Cmd + Enter
- * runs the obfuscator.
- */
-input.addEventListener(
-  "keydown",
-  event => {
-    if (
-      (event.ctrlKey ||
-        event.metaKey) &&
-      event.key === "Enter"
-    ) {
-      event.preventDefault();
+copyBtn.addEventListener(
+  "click",
+  async () => {
+    if (!output.value) {
+      setMessage(
+        "Nothing to copy."
+      );
 
-      obfuscateBtn.click();
+      return;
     }
+
+    try {
+      await navigator.clipboard.writeText(
+        output.value
+      );
+
+      setMessage(
+        "Output copied."
+      );
+    } catch {
+      setMessage(
+        "Copy failed."
+      );
+    }
+  }
+);
+
+downloadBtn.addEventListener(
+  "click",
+  () => {
+    if (!output.value) {
+      setMessage(
+        "Nothing to download."
+      );
+
+      return;
+    }
+
+    const blob =
+      new Blob(
+        [output.value],
+        {
+          type:
+            "text/plain;charset=utf-8"
+        }
+      );
+
+    const url =
+      URL.createObjectURL(
+        blob
+      );
+
+    const a =
+      document.createElement(
+        "a"
+      );
+
+    a.href = url;
+    a.download =
+      "obfuscated.luau";
+
+    document.body.appendChild(a);
+
+    a.click();
+
+    a.remove();
+
+    URL.revokeObjectURL(
+      url
+    );
+
+    setMessage(
+      "Download started."
+    );
   }
 );
