@@ -1,6 +1,21 @@
 // constant-hider.js
-// Conservative Luau constant hider.
-// Never inserts control characters into generated Luau.
+// Hides Luau constants without using constant tables or [index] access.
+//
+// Example:
+//
+// Before:
+//     game:GetService("RunService")
+//     task.wait(0.5)
+//     if true then
+//
+// After:
+//     local __S_xxxxxxx = "RunService"
+//     local __N_xxxxxxx = 0.5
+//     local __B_xxxxxxx = true
+//
+//     game:GetService(__S_xxxxxxx)
+//     task.wait(__N_xxxxxxx)
+//     if __B_xxxxxxx then
 
 function randomName(prefix, used) {
   let name;
@@ -11,284 +26,460 @@ function randomName(prefix, used) {
   } while (used.has(name));
 
   used.add(name);
+
   return name;
 }
 
-function escapeLuauString(value) {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\r/g, "\\r")
-    .replace(/\n/g, "\\n")
-    .replace(/\t/g, "\\t");
+function isIdentifierStart(char) {
+  return /[A-Za-z_]/.test(char || "");
 }
 
-function unquoteString(value) {
-  if (
-    value.length >= 2 &&
-    (
-      value[0] === '"' ||
-      value[0] === "'"
-    ) &&
-    value[value.length - 1] === value[0]
-  ) {
-    return value.slice(1, -1);
+function isIdentifierPart(char) {
+  return /[A-Za-z0-9_]/.test(char || "");
+}
+
+function isDigit(char) {
+  return /[0-9]/.test(char || "");
+}
+
+function readQuotedString(source, start) {
+  const quote = source[start];
+
+  let i = start + 1;
+
+  while (i < source.length) {
+    const char = source[i];
+
+    // Escape sequence
+    if (char === "\\") {
+      i += 2;
+      continue;
+    }
+
+    // Closing quote
+    if (char === quote) {
+      return i + 1;
+    }
+
+    i++;
   }
 
-  return value;
+  // Unterminated string.
+  return source.length;
+}
+
+function readLineComment(source, start) {
+  let i = start + 2;
+
+  while (
+    i < source.length &&
+    source[i] !== "\n"
+  ) {
+    i++;
+  }
+
+  return i;
+}
+
+function readBlockComment(source, start) {
+  const end = source.indexOf("]]", start + 4);
+
+  if (end === -1) {
+    return source.length;
+  }
+
+  return end + 2;
+}
+
+function readNumber(source, start) {
+  let i = start;
+
+  /*
+   * Hexadecimal:
+   *
+   * 0x10
+   * 0XFF
+   */
+  if (
+    source[i] === "0" &&
+    (source[i + 1] === "x" ||
+      source[i + 1] === "X")
+  ) {
+    i += 2;
+
+    while (
+      i < source.length &&
+      /[0-9A-Fa-f]/.test(source[i])
+    ) {
+      i++;
+    }
+
+    return i;
+  }
+
+  /*
+   * Decimal numbers.
+   *
+   * Supports:
+   * 123
+   * 123.45
+   * .45
+   * 1e5
+   * 1.5e-3
+   */
+  if (source[i] === ".") {
+    i++;
+
+    while (
+      i < source.length &&
+      isDigit(source[i])
+    ) {
+      i++;
+    }
+  } else {
+    while (
+      i < source.length &&
+      isDigit(source[i])
+    ) {
+      i++;
+    }
+
+    if (source[i] === ".") {
+      i++;
+
+      while (
+        i < source.length &&
+        isDigit(source[i])
+      ) {
+        i++;
+      }
+    }
+  }
+
+  // Scientific notation
+  if (
+    source[i] === "e" ||
+    source[i] === "E"
+  ) {
+    let j = i + 1;
+
+    if (
+      source[j] === "+" ||
+      source[j] === "-"
+    ) {
+      j++;
+    }
+
+    const exponentStart = j;
+
+    while (
+      j < source.length &&
+      isDigit(source[j])
+    ) {
+      j++;
+    }
+
+    // Only consume exponent when digits exist.
+    if (j > exponentStart) {
+      i = j;
+    }
+  }
+
+  return i;
 }
 
 function hideConstants(source) {
   const usedNames = new Set();
 
-  const stringMap = new Map();
-  const numberMap = new Map();
-  const booleanMap = new Map();
-
   /*
-   * Safe placeholders.
-   *
-   * IMPORTANT:
-   * Do not use \u0001 / \u0002 / \u0003 / \u0004.
-   * Those characters are invalid in generated Luau.
+   * Track existing identifiers so generated names
+   * do not collide with user code.
    */
-  const protectedParts = [];
+  for (let i = 0; i < source.length;) {
+    const char = source[i];
 
-  function protect(match) {
-    const id =
-      `__LUAPROTECT_${protectedParts.length}__`;
-
-    protectedParts.push(match);
-
-    return id;
-  }
-
-  /*
-   * Protect strings and comments.
-   */
-  let masked = source.replace(
-    /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|--\[\[[\s\S]*?\]\]|--[^\n]*/g,
-    protect
-  );
-
-  /*
-   * Collect constants from protected parts.
-   */
-  for (const part of protectedParts) {
-    if (part.startsWith("--")) {
+    // Strings
+    if (char === '"' || char === "'") {
+      i = readQuotedString(source, i);
       continue;
     }
 
-    if (
-      part.startsWith('"') ||
-      part.startsWith("'")
-    ) {
-      const value = unquoteString(part);
-
-      if (!stringMap.has(value)) {
-        stringMap.set(
-          value,
-          stringMap.size + 1
-        );
-      }
+    // Comments
+    if (source.startsWith("--[[", i)) {
+      i = readBlockComment(source, i);
+      continue;
     }
+
+    if (source.startsWith("--", i)) {
+      i = readLineComment(source, i);
+      continue;
+    }
+
+    // Identifier
+    if (isIdentifierStart(char)) {
+      const start = i;
+
+      i++;
+
+      while (
+        i < source.length &&
+        isIdentifierPart(source[i])
+      ) {
+        i++;
+      }
+
+      usedNames.add(
+        source.slice(start, i)
+      );
+
+      continue;
+    }
+
+    i++;
   }
 
   /*
-   * Collect numbers.
+   * Constant maps.
    *
-   * Avoid numbers that are part of identifiers.
+   * The values are local variables, NOT tables.
    */
-  masked = masked.replace(
-    /(?<![A-Za-z0-9_])(?:0x[0-9a-f]+|\d+(?:\.\d+)?|\.\d+)(?![A-Za-z0-9_])/gi,
-    match => {
-      if (!numberMap.has(match)) {
-        numberMap.set(
-          match,
-          numberMap.size + 1
-        );
-      }
+  const stringConstants = new Map();
+  const numberConstants = new Map();
+  const booleanConstants = new Map();
 
-      return `__LUANUM_${numberMap.get(match)}__`;
-    }
-  );
-
-  /*
-   * Collect booleans.
-   */
-  masked = masked.replace(
-    /(?<![A-Za-z0-9_])(true|false)(?![A-Za-z0-9_])/g,
-    match => {
-      if (!booleanMap.has(match)) {
-        booleanMap.set(
-          match,
-          booleanMap.size + 1
-        );
-      }
-
-      return `__LUABOOL_${booleanMap.get(match)}__`;
-    }
-  );
-
-  /*
-   * Generate table names.
-   */
-  const stringTableName =
-    stringMap.size > 0
-      ? randomName("__S", usedNames)
-      : null;
-
-  const numberTableName =
-    numberMap.size > 0
-      ? randomName("__N", usedNames)
-      : null;
-
-  const booleanTableName =
-    booleanMap.size > 0
-      ? randomName("__B", usedNames)
-      : null;
-
-  /*
-   * Restore protected strings/comments.
-   */
-  masked = masked.replace(
-    /__LUAPROTECT_(\d+)__/g,
-    (_, index) => {
-      const original =
-        protectedParts[Number(index)];
-
-      if (!original) {
-        throw new Error(
-          "Constant hider: invalid protected-part index"
-        );
-      }
-
-      /*
-       * Comments remain untouched.
-       */
-      if (original.startsWith("--")) {
-        return original;
-      }
-
-      /*
-       * Strings become string-table references.
-       */
-      const value =
-        unquoteString(original);
-
-      const position =
-        stringMap.get(value);
-
-      if (!position || !stringTableName) {
-        throw new Error(
-          "Constant hider: string mapping failed"
-        );
-      }
-
-      return `${stringTableName}[${position}]`;
-    }
-  );
-
-  /*
-   * Replace number placeholders.
-   */
-  masked = masked.replace(
-    /__LUANUM_(\d+)__/g,
-    (_, index) => {
-      const wantedIndex =
-        Number(index);
-
-      for (const [value, position] of numberMap) {
-        if (position === wantedIndex) {
-          return `${numberTableName}[${position}]`;
-        }
-      }
-
-      throw new Error(
-        "Constant hider: number mapping failed"
+  function getStringName(value) {
+    if (!stringConstants.has(value)) {
+      stringConstants.set(
+        value,
+        randomName("__S", usedNames)
       );
     }
-  );
 
-  /*
-   * Replace boolean placeholders.
-   */
-  masked = masked.replace(
-    /__LUABOOL_(\d+)__/g,
-    (_, index) => {
-      const wantedIndex =
-        Number(index);
+    return stringConstants.get(value);
+  }
 
-      for (const [value, position] of booleanMap) {
-        if (position === wantedIndex) {
-          return `${booleanTableName}[${position}]`;
-        }
-      }
-
-      throw new Error(
-        "Constant hider: boolean mapping failed"
+  function getNumberName(value) {
+    if (!numberConstants.has(value)) {
+      numberConstants.set(
+        value,
+        randomName("__N", usedNames)
       );
     }
-  );
+
+    return numberConstants.get(value);
+  }
+
+  function getBooleanName(value) {
+    if (!booleanConstants.has(value)) {
+      booleanConstants.set(
+        value,
+        randomName("__B", usedNames)
+      );
+    }
+
+    return booleanConstants.get(value);
+  }
 
   /*
-   * Build header.
+   * Escape a string literal safely.
+   *
+   * We keep the original literal contents rather
+   * than decoding/re-encoding it. This prevents
+   * escaped sequences such as "\\n" from changing
+   * their runtime meaning.
+   */
+  function normalizeStringLiteral(value) {
+    return value;
+  }
+
+  /*
+   * Transform source directly.
+   *
+   * This scanner skips comments and strings correctly,
+   * so constants inside them are never modified.
+   */
+  let output = "";
+  let i = 0;
+
+  while (i < source.length) {
+    const char = source[i];
+
+    /*
+     * Block comment
+     */
+    if (source.startsWith("--[[", i)) {
+      const end = readBlockComment(source, i);
+
+      output += source.slice(i, end);
+
+      i = end;
+      continue;
+    }
+
+    /*
+     * Line comment
+     */
+    if (source.startsWith("--", i)) {
+      const end = readLineComment(source, i);
+
+      output += source.slice(i, end);
+
+      i = end;
+      continue;
+    }
+
+    /*
+     * Quoted string
+     */
+    if (
+      char === '"' ||
+      char === "'"
+    ) {
+      const end =
+        readQuotedString(source, i);
+
+      const literal =
+        source.slice(i, end);
+
+      const name =
+        getStringName(literal);
+
+      output += name;
+
+      i = end;
+      continue;
+    }
+
+    /*
+     * Identifier / keyword
+     */
+    if (isIdentifierStart(char)) {
+      const start = i;
+
+      i++;
+
+      while (
+        i < source.length &&
+        isIdentifierPart(source[i])
+      ) {
+        i++;
+      }
+
+      const word =
+        source.slice(start, i);
+
+      /*
+       * Boolean literals
+       */
+      if (word === "true") {
+        output += getBooleanName("true");
+      } else if (word === "false") {
+        output += getBooleanName("false");
+      } else {
+        output += word;
+      }
+
+      continue;
+    }
+
+    /*
+     * Number literal
+     *
+     * Don't treat the "." in something like:
+     * object.property
+     * as a number.
+     */
+    if (
+      isDigit(char) ||
+      (
+        char === "." &&
+        isDigit(source[i + 1])
+      )
+    ) {
+      /*
+       * Avoid interpreting a decimal portion of
+       * an identifier-like token as a standalone number.
+       */
+      if (
+        char === "." &&
+        i > 0 &&
+        isIdentifierPart(source[i - 1])
+      ) {
+        output += char;
+        i++;
+        continue;
+      }
+
+      const end =
+        readNumber(source, i);
+
+      const literal =
+        source.slice(i, end);
+
+      const name =
+        getNumberName(literal);
+
+      output += name;
+
+      i = end;
+      continue;
+    }
+
+    /*
+     * Everything else is copied exactly.
+     *
+     * This means existing Luau [] syntax remains
+     * untouched.
+     */
+    output += char;
+
+    i++;
+  }
+
+  /*
+   * Generate scalar local declarations.
+   *
+   * IMPORTANT:
+   * There are no tables and no [index] access here.
    */
   const header = [];
 
-  if (stringTableName) {
+  for (
+    const [literal, name]
+    of stringConstants
+  ) {
     header.push(
-      `local ${stringTableName} = {`
+      `local ${name} = ${normalizeStringLiteral(literal)}`
     );
-
-    for (const [value] of stringMap) {
-      header.push(
-        `    "${escapeLuauString(value)}",`
-      );
-    }
-
-    header.push("}");
-    header.push("");
   }
 
-  if (numberTableName) {
+  for (
+    const [literal, name]
+    of numberConstants
+  ) {
     header.push(
-      `local ${numberTableName} = {`
+      `local ${name} = ${literal}`
     );
-
-    for (const [value] of numberMap) {
-      header.push(
-        `    ${value},`
-      );
-    }
-
-    header.push("}");
-    header.push("");
   }
 
-  if (booleanTableName) {
+  for (
+    const [literal, name]
+    of booleanConstants
+  ) {
     header.push(
-      `local ${booleanTableName} = {`
+      `local ${name} = ${literal}`
     );
-
-    for (const [value] of booleanMap) {
-      header.push(
-        `    ${value},`
-      );
-    }
-
-    header.push("}");
-    header.push("");
   }
 
   return {
-    source: masked,
+    source: output,
+
     header: header.join("\n"),
 
     counts: {
-      strings: stringMap.size,
-      numbers: numberMap.size,
-      booleans: booleanMap.size
+      strings: stringConstants.size,
+      numbers: numberConstants.size,
+      booleans: booleanConstants.size
     }
   };
 }
