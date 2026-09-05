@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Luau Obfuscator</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="bg"></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">L</div>
+      <div>
+        <div class="title">Luau Obfuscator</div>
+        <div class="sub">Local source transformer</div>
+      </div>
+    </div>
+    <div class="status"><span></span> Ready</div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">LUAU TOOLCHAIN</div>
+        <h1>Protect your Luau source.</h1>
+        <p>Hide constants and fold safe numeric expressions in one clean workspace.</p>
+      </div>
+      <div class="chips">
+        <span>Parser</span><span>Constants</span><span>Math Solver</span>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="panel">
+        <div class="panel-head">
+          <span>INPUT.LUAU</span>
+          <button id="clearBtn" class="ghost">Clear</button>
+        </div>
+        <textarea id="input" spellcheck="false">local message = "Hello Luau"
+local damage = 20 + 10 * 2
+local enabled = true
+
+print(message, damage, enabled)</textarea>
+      </div>
+
+      <div class="center-actions">
+        <button id="obfuscateBtn" class="primary">Obfuscate <b>→</b></button>
+        <label class="check"><input id="hideConstants" type="checkbox" checked> Constant Hider</label>
+        <label class="check"><input id="solveMath" type="checkbox" checked> Math Solver</label>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>OUTPUT.LUAU</span>
+          <div class="actions">
+            <button id="copyBtn" class="ghost">Copy</button>
+            <button id="downloadBtn" class="ghost">Download</button>
+          </div>
+        </div>
+        <textarea id="output" spellcheck="false" readonly placeholder="Obfuscated output will appear here..."></textarea>
+      </div>
+    </section>
+
+    <footer>
+      <span>Runs through your local Node server.</span>
+      <span id="message">No output yet.</span>
+    </footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
